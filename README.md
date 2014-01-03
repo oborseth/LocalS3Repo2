@@ -1,3 +1,4 @@
+```php
 /*
 	Modified to work with 1.21 and CloudFront.
 	Owen Borseth - owen at borseth dot us
@@ -41,3 +42,4 @@ $wgLocalFileRepo = array(
 );
 require_once("$IP/extensions/LocalS3Repo/LocalS3Repo.php");
 // s3 filesystem repo settings - end
+```
