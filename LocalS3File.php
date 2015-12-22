@@ -85,7 +85,7 @@ class LocalS3File extends File {
 			if(! $this->repo->AWS_S3_PUBLIC) {
 				$path = self::getAuthenticatedURL($this->repo->AWS_S3_BUCKET, $this->repo->getZonePath('public') . $path, 60*60*24*7 /*week*/, false, $this->repo->AWS_S3_SSL);
 			} else {
-				$path = $this->repo->url . $path;
+				$path = $this->repo->getZoneUrl('public') . $path;
 			}
 		}
 		wfDebug( __METHOD__ . " return: $path \n".print_r($this,true)."\n" );
@@ -633,7 +633,7 @@ class LocalS3File extends File {
 
 			$thumb = $this->handler->doTransform( $this, $this->thumbTempPath, $thumbUrl, $params );
 
-			wfDebug( __METHOD__. " thumb: ".print_r($thumb->url,true)."\n" );
+			wfDebug( __METHOD__. " thumb: ".print_r($thumb->getUrl(),true)."\n" );
 			$s3path = $thumbPath;
 
 			$info = $s3->putObjectFile($this->thumbTempPath, $this->repo->AWS_S3_BUCKET, $s3path, 

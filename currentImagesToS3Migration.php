@@ -27,7 +27,7 @@ class ImageMigration extends Maintenance
 
 		// In my situation the images were in two different S3 buckets already. It will search these locations to try and find it.
 		// Your images are probably local already, so you may need to modify the code further down to work with local directories.
-		$s3Buckets = array(...);
+		//$s3Buckets = array(...);
 
 		$dbw = wfGetDB( DB_MASTER );
 
