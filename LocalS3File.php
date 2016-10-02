@@ -1407,19 +1407,27 @@ class LocalS3File extends File {
 	 * @return FileRepoStatus object.
 	 */
 	function delete( $reason, $suppress = false ) {
-		$this->lock();
-		$batch = new LocalS3FileDeleteBatch( $this, $reason, $suppress );
+		//$dbw = $this->repo->getMasterDB();
+		//$batch = new LocalS3FileDeleteBatch( $this, $reason, $suppress );		
+
+		//$this->lock();
+		$batch = new LocalS3FileDeleteBatch( $this, $reason, $suppress );		
 		$batch->addCurrent();
 
 		# Get old version relative paths
 		$dbw = $this->repo->getMasterDB();
+
+		/*
 		$result = $dbw->select( 'oldimage',
 			array( 'oi_archive_name' ),
 			array( 'oi_name' => $this->getName() ) );
 		while ( $row = $dbw->fetchObject( $result ) ) {
 			$batch->addOld( $row->oi_archive_name );
 		}
+		*/
+
 		$status = $batch->execute();
+		
 
 		if ( $status->ok ) {
 			// Update site_stats
@@ -1923,6 +1931,16 @@ class LocalS3FileDeleteBatch {
 	 * Run the transaction
 	 */
 	function execute() {
+		global $status;
+
+		$status = new customStatus();
+		$dbw = $this->file->repo->getMasterDB();
+		$status->delete($dbw, $this->file->title->mDbkeyform);
+		$status->good = 1;
+		$status->ok = 1;
+
+		return $status;
+
 		global $wgUseSquid;
 		wfProfileIn( __METHOD__ );
 
@@ -2472,4 +2490,23 @@ class LocalS3FileMoveBatch {
 			}
 		return $filteredTriplets;
 	}
+}
+
+
+
+class customStatus {
+
+	function isOK(){
+		return true;
+	}
+
+	function isGood(){
+		return true;
+	}
+
+	function delete(&$dbw, $title){
+
+		$dbw->query( "DELETE FROM image WHERE img_name = '$title'" );
+	}
+
 }
