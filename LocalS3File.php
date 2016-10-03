@@ -649,6 +649,15 @@ class LocalS3File extends File {
 						$this->thumbTempPath
 					  );
 
+			if(!file_exists($this->thumbTempPath)){
+				$tmpImg = file_get_contents($this->getUrl());
+			
+				if(!empty($tmpImg) && !is_object($tmpImg)){
+					file_put_contents($this->thumbTempPath, $tmpImg);
+				}
+			}
+
+
 			//copy($this->thumbTempPath, $thumbPath);
 			/*
 			//if private then it needs to try again with key
