@@ -82,7 +82,7 @@ class LocalS3Repo extends FSs3Repo {
 	 * remote operation.
 	 * @return FileRepoStatus
 	 */
-	function cleanupDeletedBatch( $storageKeys ) {
+	function cleanupDeletedBatch(array $storageKeys) {
 		$root = $this->getZonePath( 'deleted' );
 		$dbw = $this->getMasterDB();
 		$status = $this->newGood();
@@ -124,7 +124,7 @@ class LocalS3Repo extends FSs3Repo {
 	 *
 	 * @param $title Title of file
 	 */
-	function checkRedirect( $title ) {
+	function checkRedirect(Title $title) {
 		global $wgMemc;
 
 		if( is_string( $title ) ) {
@@ -242,7 +242,7 @@ class LocalS3Repo extends FSs3Repo {
 	 *
 	 * @param $title Title of page
 	 */
-	function invalidateImageRedirect( $title ) {
+	function invalidateImageRedirect(Title $title) {
 		global $wgMemc;
 		$memcKey = $this->getSharedCacheKey( 'image_redirect', md5( $title->getDBkey() ) );
 		if ( $memcKey ) {

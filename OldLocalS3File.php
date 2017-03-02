@@ -201,7 +201,7 @@ class OldLocalS3File extends LocalS3File {
 	 * @param $field Integer
 	 * @return bool
 	 */
-	function userCan( $field ) {
+	function userCan($field, User $user = NULL) {
 		if( isset($this->deleted) && ($this->deleted & $field) == $field ) {
 			global $wgUser;
 			$permission = ( $this->deleted & File::DELETED_RESTRICTED ) == File::DELETED_RESTRICTED
