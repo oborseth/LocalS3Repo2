@@ -85,7 +85,7 @@ class LocalS3File extends File {
 			if(! $this->repo->AWS_S3_PUBLIC) {
 				$path = self::getAuthenticatedURL($this->repo->AWS_S3_BUCKET, $this->repo->getZonePath('public') . $path, 60*60*24*7 /*week*/, false, $this->repo->AWS_S3_SSL);
 			} else {
-				$path = $this->repo->url . $path;
+				$path = $this->repo->getZoneUrl('public') . $path;
 			}
 		}
 		wfDebug( __METHOD__ . " return: $path \n".print_r($this,true)."\n" );
@@ -327,7 +327,7 @@ class LocalS3File extends File {
 	/**
 	 * Load file metadata from cache or DB, unless already loaded
 	 */
-	function load() {
+	function load($flags = 0) {
 		if ( !$this->dataLoaded ) {
 			if ( !$this->loadFromCache() ) {
 				$this->loadFromDB();
@@ -584,6 +584,7 @@ class LocalS3File extends File {
 	 *                      keys are width, height and page.
 	 * @param integer $flags A bitfield, may contain self::RENDER_NOW to force rendering
 	 * @return MediaTransformOutput
+	 *	Key to s3 Uploads
 	 */
 	function transform( $params, $flags = 0 ) {
 		global $wgUseSquid, $wgIgnoreImageErrors;
@@ -607,13 +608,14 @@ class LocalS3File extends File {
 				}
 			}
 
+			//I believe the issue is here due to public conversion works but without a key private does not.
 			$normalisedParams = $params;
 			$this->handler->normaliseParams( $this, $normalisedParams );
 			$thumbName = $this->thumbName( $normalisedParams );
 			$thumbPath = $this->getThumbPath( $thumbName );
 			$thumbUrl = $this->getThumbUrl( $thumbPath );
 			wfDebug( __METHOD__.": thumbName: $thumbName, thumbPath: $thumbPath\n  thumbUrl: $thumbUrl\n" );
-
+			
 			if ( $this->repo->canTransformVia404() && !($flags & self::RENDER_NOW ) ) {
 				$thumb = $this->handler->getTransform( $this, $thumbPath, $thumbUrl, $params );
 				break;
@@ -621,21 +623,65 @@ class LocalS3File extends File {
 
 			wfDebug( __METHOD__.": Doing stat for $thumbPath\n  ($thumbUrl)\n" );
 			$this->migrateThumbFile( $thumbName );
+
+			//$thumbPath - is the full path of the image on s3
 			$info = $s3->getObjectInfo($this->repo->AWS_S3_BUCKET, $thumbPath);
+
+			//thumbTempPath
+			//This makes the temp file and then attempts to put contents in to the temp file
+			$this->thumbTempPath = tempnam(wfTempDir(), "s3thumb-");
+			//copy($this->getUrl(), $this->thumbTempPath);
+
+			//Get Full Path of Original Uploaded Image
+			$fullPath = str_replace("thumb/", "", $thumbPath);
+			$fullPath = explode("/",$fullPath);
+			unset( $fullPath[ count($fullPath) - 1]);
+			$fullPath = implode("/",$fullPath);
+
+			//echo $fullPath."<br>";
+			//echo $thumbPath."<br>";
+			//echo $this->thumbTempPath."<br><br><br>";
+
+			//This is where it request the file and put it in the thumbTempPath
+			$s3->getObject(
+						$this->repo->AWS_S3_BUCKET,
+						$fullPath, 
+						$this->thumbTempPath
+					  );
+
+			if(!file_exists($this->thumbTempPath)){
+				$tmpImg = file_get_contents($this->getUrl());
+			
+				if(!empty($tmpImg) && !is_object($tmpImg)){
+					file_put_contents($this->thumbTempPath, $tmpImg);
+				}
+			}
+
+
+			//copy($this->thumbTempPath, $thumbPath);
+			/*
+			//if private then it needs to try again with key
+			if(!preg_match("/AWSAccessKeyId/",$thumbUrl) && $this->repo->AWS_S3_PUBLIC ){
+				//public static function getAuthenticatedURL($bucket, $uri, $lifetime, $hostBucket = false, $https = false) {
+				$thumbUrl = self::getAuthenticatedURL($this->repo->AWS_S3_BUCKET, $thumbPath, 60*60*24*7, false,  $this->repo->AWS_S3_SSL);
+			}
+			*/
+
 			wfDebug(__METHOD__." thumbPath: $thumbPath\ninfo:".print_r($info,true)."\n");
+
+			//Gets the transformed file, not sure where it transformed it though.
 			if ( $info /*file_exists( $thumbPath )*/ ) {
 				$thumb = $this->handler->getTransform( $this, $thumbPath, $thumbUrl, $params );
 				break;
 			}
 
-			$this->thumbTempPath = tempnam(wfTempDir(), "s3thumb-");
-			copy($this->getUrl(), $this->thumbTempPath);
-
+			//This makes the thumb from the temp file
 			$thumb = $this->handler->doTransform( $this, $this->thumbTempPath, $thumbUrl, $params );
 
-			wfDebug( __METHOD__. " thumb: ".print_r($thumb->url,true)."\n" );
+			wfDebug( __METHOD__. " thumb: ".print_r($thumb->getUrl(),true)."\n" );
 			$s3path = $thumbPath;
 
+			//This puts the file to the temp location
 			$info = $s3->putObjectFile($this->thumbTempPath, $this->repo->AWS_S3_BUCKET, $s3path, 
 							($this->repo->AWS_S3_PUBLIC ? S3::ACL_PUBLIC_READ : S3::ACL_PRIVATE));
 
@@ -664,6 +710,133 @@ class LocalS3File extends File {
 		wfDebug( __METHOD__. " return thumb: ".print_r($thumb,true)."\n" );
 		return is_object( $thumb ) ? $thumb : false;
 	}
+
+
+	public function generateAndSaveThumb( $tmpFile, $transformParams, $flags ) {
+		global $IP, $wgUploadDirectory, $wgAWS_S3_BUCKET, $wgAWS_BucketDir, $aws_s3_client, $wgUploadBaseUrl;
+		global $wgIgnoreImageErrors;
+
+		$stats = RequestContext::getMain()->getStats();
+
+		$handler = $this->getHandler();
+
+		$normalisedParams = $transformParams;
+		$handler->normaliseParams( $this, $normalisedParams );
+
+		$thumbName = $this->thumbName( $normalisedParams );
+		$thumbUrl = $this->getThumbUrl( $thumbName );
+		$thumbPath = $this->getThumbPath( $thumbName ); // final thumb path
+
+		//S3 determine if thumb is on S3 if not use original
+		//$this->file_existsS3();
+
+		$this->thumbTempPath = tempnam(wfTempDir(), "s3thumb-");
+
+		$s3->getObject(
+					$this->repo->AWS_S3_BUCKET,
+					$thumbPath, 
+					$this->thumbTempPath
+				  );
+
+		//$tmpThumbPath = $tmpFile->getPath();
+
+		/**/
+		//This only can be activated once the sync is complete and the delete files have been deleted.
+		//This section searches for the thumbpath and if it does not exists
+		if(!file_exists($tmpThumbPath) || filesize($tmpThumbPath) == 0){
+			
+			//Get Path
+			//$s3ThumbPath = str_replace("https://".$wgAWS_S3_BUCKET.".s3.amazonaws.com/","",$thumbUrl);
+			//$temps3 = explode("?",$s3ThumbPath);
+			//$s3ThumbPath = $temps3[0];
+			$s3ThumbPath = str_replace("images/", "", $wgUploadDirectory)."/thumb".str_replace("mwstore://local-backend/local-thumb", "", $thumbPath);
+			$s3FullPath = explode("/", str_replace("images/", "", $wgUploadDirectory)."".str_replace("mwstore://local-backend/local-thumb", "", $thumbPath));
+			unset( $s3FullPath[ count($s3FullPath)-1 ] );
+			$s3FullPath = implode("/", $s3FullPath);
+			
+			if($this->file_existsS3($s3ThumbPath)){
+
+				//$tmpThumbPath = $this->getS3Url($s3ThumbPath); //$thumbUrl;
+				//$thumbUrl = $this->getS3Url($s3ThumbPath); 
+
+			} else if($this->file_existsS3($s3FullPath)){
+				//$tmpThumbPath = $this->getS3Url($s3FullPath); //$thumbUrl;
+				//$thumbUrl = $this->getS3Url($s3FullPath); 
+
+			}
+
+		}
+		/**/
+
+
+		if ( $handler->supportsBucketing() ) {
+			$this->generateBucketsIfNeeded( $normalisedParams, $flags );
+		}
+
+		$starttime = microtime( true );
+
+		// Actually render the thumbnail...
+		//Add the s3 capability of getting the s3 url to generate new thumbnail if it didnt exists
+		/*
+		$thumbUrl = "/opt/bitnami/apache2/htdocs/images/noaccess.png";
+		$thumb = $handler->doTransform( $image, $dstPath, 		$dstUrl, $params, $flags = 0);
+		*/
+		//echo $thumbUrl."<br>";
+		
+		$thumb = $handler->doTransform( $this , $tmpThumbPath, $thumbUrl, $transformParams );
+
+		/*ß
+		if(preg_match("/120px/",$thumbUrl)){
+			echo "<br><pre>";
+			print_r($thumb);
+			echo $tmpThumbPath."<br>";
+			echo $thumbUrl."<br>";
+			echo "</pre>";
+		}
+		*/
+
+		$tmpFile->bind( $thumb ); // keep alive with $thumb
+
+		$statTiming = microtime( true ) - $starttime;
+		$stats->timing( 'media.thumbnail.generate.transform', 1000 * $statTiming );
+		
+		/*
+		Kelvin
+		*/
+
+		if ( !$thumb ) { // bad params?
+			$thumb = false;
+
+		} elseif ( $thumb->isError() ) { // transform error
+			/** @var $thumb MediaTransformError */
+			$this->lastError = $thumb->toText();
+			// Ignore errors if requested
+			if ( $wgIgnoreImageErrors && !( $flags & self::RENDER_NOW ) ) {
+				$thumb = $handler->getTransform( $this, $tmpThumbPath, $thumbUrl, $transformParams );
+			}
+		} elseif ( $this->repo && $thumb->hasFile() && !$thumb->fileIsSource() ) {
+			// Copy the thumbnail from the file system into storage...
+
+			$starttime = microtime( true );
+
+			$disposition = $this->getThumbDisposition( $thumbName );
+			$status = $this->repo->quickImport( $tmpThumbPath, $thumbPath, $disposition );
+			if ( $status->isOK() ) {
+				$thumb->setStoragePath( $thumbPath );
+			} else {
+				$thumb = $this->transformErrorOutput( $thumbPath, $thumbUrl, $transformParams, $flags );
+			}
+
+			$statTiming = microtime( true ) - $starttime;
+			$stats->timing( 'media.thumbnail.generate.store', 1000 * $statTiming );
+
+			// Give extensions a chance to do something with this thumbnail...
+			Hooks::run( 'FileTransformed', [ $this, $thumb, $tmpThumbPath, $thumbPath ] );
+		}
+
+
+		return $thumb;
+	}
 	
 	/** Get the URL of the thumbnail directory, or a particular file if $suffix is specified.
 	 *  $suffix is a path relative to the S3 bucket, and includes the upload directory
@@ -674,10 +847,16 @@ class LocalS3File extends File {
 		else
 			$path = $this->repo->getUrlBase() . "/$suffix";
 
-		if(! $this->repo->AWS_S3_PUBLIC) 
+		if(!$this->repo->AWS_S3_PUBLIC){
 			$this->url = self::getAuthenticatedURL($this->repo->AWS_S3_BUCKET, 
-				$suffix, 60*60*24*7 /*week*/, false, 
+				$suffix, 60*60*24*7, false, 
 				$this->repo->AWS_S3_SSL);
+		}
+
+		$path = self::getAuthenticatedURL($this->repo->AWS_S3_BUCKET, 
+				$suffix, 60*60*24*7, false, 
+				$this->repo->AWS_S3_SSL);
+
 		return $path;
 	}
 
@@ -699,10 +878,17 @@ class LocalS3File extends File {
 		global $s3;
 		if ( !isset( $this->tempPath ) ) {
 			$this->tempPath = tempnam(wfTempDir(), "s3file-");
-			$info = $s3->getObject($this->repo->AWS_S3_BUCKET,
-				$this->repo->directory . '/'  . $this->getUrlRel(), $this->tempPath);
+			
+			//This is not getting private files - kelvin
+			$info = $s3->getObject(
+									$this->repo->AWS_S3_BUCKET,
+									$this->repo->directory . '/'  . $this->getUrlRel(), 
+									$this->tempPath
+								  );
+
 			if(!$info) $this->tempPath = false;
 		}
+
 		return $this->tempPath;
 	}
 
@@ -789,7 +975,7 @@ class LocalS3File extends File {
 	/**
 	 * Delete all previously generated thumbnails, refresh metadata in memcached and purge the squid
 	 */
-	function purgeCache() {
+	function purgeCache($options = []) {
 		// Refresh metadata cache
 		$this->purgeMetadataCache();
 
@@ -967,8 +1153,7 @@ class LocalS3File extends File {
 	 * Record a file upload in the upload log and the image table
 	 * @deprecated use upload()
 	 */
-	function recordUpload( $oldver, $desc, $license = '', $copyStatus = '', $source = '',
-		$watch = false, $timestamp = false )
+	function recordUpload($oldver, $desc, $license = '', $copyStatus = '', $source = '', $watch = false, $timestamp = false, User $user = NULL)
 	{
 		$pageText = SpecialUpload::getInitialPageText( $desc, $license, $copyStatus, $source );
 		if ( !$this->recordUpload2( $oldver, $desc, $pageText ) ) {
@@ -1159,7 +1344,7 @@ class LocalS3File extends File {
 	 * @return FileRepoStatus object. On success, the value member contains the
 	 *     archive name, or an empty string if it was a new file.
 	 */
-	function publish( $srcPath, $flags = 0 ) {
+	function publish($srcPath, $flags = 0, array $options = []) {
 		$this->lock();
 		$dstRel = $this->getRel();
 		$archiveName = gmdate( 'YmdHis' ) . '!'. $this->getName();
@@ -1229,20 +1414,28 @@ class LocalS3File extends File {
 	 * @param $suppress
 	 * @return FileRepoStatus object.
 	 */
-	function delete( $reason, $suppress = false ) {
-		$this->lock();
-		$batch = new LocalS3FileDeleteBatch( $this, $reason, $suppress );
+	function delete($reason, $suppress = false, $user = null) {
+		//$dbw = $this->repo->getMasterDB();
+		//$batch = new LocalS3FileDeleteBatch( $this, $reason, $suppress );		
+
+		//$this->lock();
+		$batch = new LocalS3FileDeleteBatch( $this, $reason, $suppress );		
 		$batch->addCurrent();
 
 		# Get old version relative paths
 		$dbw = $this->repo->getMasterDB();
+
+		/*
 		$result = $dbw->select( 'oldimage',
 			array( 'oi_archive_name' ),
 			array( 'oi_name' => $this->getName() ) );
 		while ( $row = $dbw->fetchObject( $result ) ) {
 			$batch->addOld( $row->oi_archive_name );
 		}
+		*/
+
 		$status = $batch->execute();
+		
 
 		if ( $status->ok ) {
 			// Update site_stats
@@ -1329,7 +1522,7 @@ class LocalS3File extends File {
 	 * This is not used by ImagePage for local files, since (among other things)
 	 * it skips the parser cache.
 	 */
-	function getDescriptionText() {
+	function getDescriptionText($lang = false) {
 		global $wgParser;
 		$revision = Revision::newFromTitle( $this->title );
 		if ( !$revision ) return false;
@@ -1339,7 +1532,7 @@ class LocalS3File extends File {
 		return $pout->getText();
 	}
 
-	function getDescription() {
+	function getDescription($audience = self::FOR_PUBLIC, User $user = NULL) {
 		$this->load();
 		return $this->description;
 	}
@@ -1407,6 +1600,8 @@ class LocalS3File extends File {
 	 * Return the complete URL of the file
 	 */
 	public function getUrl() {
+		global $s3;
+
 		if ( !isset( $this->url ) ) 
 		{
 			if($this->repo->cloudFrontUrl)
@@ -1414,12 +1609,146 @@ class LocalS3File extends File {
 			else
 				$this->url = $this->repo->getZoneUrl( 'public' ) . '/' . $this->getUrlRel();
 
-			if(! $this->repo->AWS_S3_PUBLIC) 
+			if(!$this->repo->AWS_S3_PUBLIC){
 				$this->url = self::getAuthenticatedURL($this->repo->AWS_S3_BUCKET, $this->repo->directory . '/'  . $this->getUrlRel(), 60*60*24*7 /*week*/, false, $this->repo->AWS_S3_SSL);
+			}
 		}
+
+/* kelvin
+		$d =
+		array(
+		    'Bucket' => $this->repo->AWS_S3_BUCKET,
+		    'Key'    => $key
+		);
+
+		$this->tempPath = tempnam(wfTempDir(), "s3file-");
+		$info = $s3->getObject(
+								$this->repo->AWS_S3_BUCKET,
+								$this->repo->directory . '/'  . $this->getUrlRel(), 
+								$this->tempPath
+							  );
+
+		echo $this->repo->directory . '/'  . $this->getUrlRel();
+		echo "<pre>";
+		print_r($info);
+		echo "</pre>";
+		exit;
+		*/
+
 		wfDebug( __METHOD__ . ": ".print_r($this->url, true)."\n" );
 		return $this->url;
 	}
+
+
+	/*
+	public function generateAndSaveThumb( $tmpFile, $transformParams, $flags ) {
+		global $IP, $wgUploadDirectory, $wgAWS_S3_BUCKET, $wgAWS_BucketDir, $aws_s3_client, $wgUploadBaseUrl;
+		global $wgIgnoreImageErrors;
+
+		$stats = RequestContext::getMain()->getStats();
+
+		$handler = $this->getHandler();
+
+		$normalisedParams = $transformParams;
+		$handler->normaliseParams( $this, $normalisedParams );
+
+		$thumbName = $this->thumbName( $normalisedParams );
+		$thumbUrl = $this->getThumbUrl( $thumbName );
+		$thumbPath = $this->getThumbPath( $thumbName ); // final thumb path
+
+		//S3 determine if thumb is on S3 if not use original
+		//$this->file_existsS3();
+		$tmpThumbPath = $tmpFile->getPath();
+
+		
+		//This only can be activated once the sync is complete and the delete files have been deleted.
+		//This section searches for the thumbpath and if it does not exists
+		if(!file_exists($tmpThumbPath) || filesize($tmpThumbPath) == 0){
+			
+			//Get Path
+			//$s3ThumbPath = str_replace("https://".$wgAWS_S3_BUCKET.".s3.amazonaws.com/","",$thumbUrl);
+			//$temps3 = explode("?",$s3ThumbPath);
+			//$s3ThumbPath = $temps3[0];
+			$s3ThumbPath = str_replace("images/", "", $wgUploadDirectory)."/thumb".str_replace("mwstore://local-backend/local-thumb", "", $thumbPath);
+			$s3FullPath = explode("/", str_replace("images/", "", $wgUploadDirectory)."".str_replace("mwstore://local-backend/local-thumb", "", $thumbPath));
+			unset( $s3FullPath[ count($s3FullPath)-1 ] );
+			$s3FullPath = implode("/", $s3FullPath);
+			
+			if($this->file_existsS3($s3ThumbPath)){
+
+				//$tmpThumbPath = $this->getS3Url($s3ThumbPath); //$thumbUrl;
+				//$thumbUrl = $this->getS3Url($s3ThumbPath); 
+
+			} else if($this->file_existsS3($s3FullPath)){
+				//$tmpThumbPath = $this->getS3Url($s3FullPath); //$thumbUrl;
+				//$thumbUrl = $this->getS3Url($s3FullPath); 
+
+			}
+
+		}
+		/
+
+
+		if ( $handler->supportsBucketing() ) {
+			$this->generateBucketsIfNeeded( $normalisedParams, $flags );
+		}
+
+		$starttime = microtime( true );
+
+		// Actually render the thumbnail...
+		//Add the s3 capability of getting the s3 url to generate new thumbnail if it didnt exists
+		
+		//$thumbUrl = "/opt/bitnami/apache2/htdocs/images/noaccess.png";
+		//$thumb = $handler->doTransform( $image, $dstPath, 		$dstUrl, $params, $flags = 0);
+		
+		//echo $thumbUrl."<br>";
+		
+
+		$thumb = $handler->doTransform( $this , $tmpThumbPath, $thumbUrl, $transformParams );
+
+		$tmpFile->bind( $thumb ); // keep alive with $thumb
+
+		$statTiming = microtime( true ) - $starttime;
+		$stats->timing( 'media.thumbnail.generate.transform', 1000 * $statTiming );
+		
+		
+		//Kelvin
+		
+
+		if ( !$thumb ) { // bad params?
+			$thumb = false;
+
+		} elseif ( $thumb->isError() ) { // transform error
+			// @var $thumb MediaTransformError 
+			$this->lastError = $thumb->toText();
+			// Ignore errors if requested
+			if ( $wgIgnoreImageErrors && !( $flags & self::RENDER_NOW ) ) {
+				$thumb = $handler->getTransform( $this, $tmpThumbPath, $thumbUrl, $transformParams );
+			}
+		} elseif ( $this->repo && $thumb->hasFile() && !$thumb->fileIsSource() ) {
+			// Copy the thumbnail from the file system into storage...
+
+			$starttime = microtime( true );
+
+			$disposition = $this->getThumbDisposition( $thumbName );
+			$status = $this->repo->quickImport( $tmpThumbPath, $thumbPath, $disposition );
+			if ( $status->isOK() ) {
+				$thumb->setStoragePath( $thumbPath );
+			} else {
+				$thumb = $this->transformErrorOutput( $thumbPath, $thumbUrl, $transformParams, $flags );
+			}
+
+			$statTiming = microtime( true ) - $starttime;
+			$stats->timing( 'media.thumbnail.generate.store', 1000 * $statTiming );
+
+			// Give extensions a chance to do something with this thumbnail...
+			Hooks::run( 'FileTransformed', [ $this, $thumb, $tmpThumbPath, $thumbPath ] );
+		}
+
+
+		return $thumb;
+	}
+	*/
 } // LocalS3File class
 
 #------------------------------------------------------------------------------
@@ -1610,6 +1939,16 @@ class LocalS3FileDeleteBatch {
 	 * Run the transaction
 	 */
 	function execute() {
+		global $status;
+
+		$status = new customStatus();
+		$dbw = $this->file->repo->getMasterDB();
+		$status->delete($dbw, $this->file->title->mDbkeyform);
+		$status->good = 1;
+		$status->ok = 1;
+
+		return $status;
+
 		global $wgUseSquid;
 		wfProfileIn( __METHOD__ );
 
@@ -2159,4 +2498,23 @@ class LocalS3FileMoveBatch {
 			}
 		return $filteredTriplets;
 	}
+}
+
+
+
+class customStatus {
+
+	function isOK(){
+		return true;
+	}
+
+	function isGood(){
+		return true;
+	}
+
+	function delete(&$dbw, $title){
+
+		$dbw->query( "DELETE FROM image WHERE img_name = '$title'" );
+	}
+
 }
